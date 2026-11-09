@@ -1,0 +1,403 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EEG Signal Game</title>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #10101a;
+      color: white;
+      text-align: center;
+    }
+
+    header { padding: 20px; }
+
+    canvas {
+      display: block;
+      width: 90%;
+      max-width: 800px;
+      height: 400px;
+      margin: auto;
+      border: 1px solid #444;
+    }
+
+    .controls { padding: 20px; }
+
+    input, select { max-width: 90%; margin: 8px; }
+    input[type="range"] { width: 250px; }
+
+    button {
+      padding: 10px 16px;
+      margin: 8px;
+      cursor: pointer;
+    }
+
+    #status {
+      color: #62f4ff;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Signal Game</h1>
+    <p>Experiment 4: Can a signal control a game?</p>
+    <p>Score: <span id="score">0</span></p>
+  </header>
+
+  <canvas id="game" width="800" height="400"></canvas>
+
+  <div class="controls">
+    <p>Input mode: <strong id="mode">Simulated</strong></p>
+
+    <p>
+      <input type="file" id="csvFile" accept=".csv,.txt">
+    </p>
+
+    <p>
+      <label for="channel">Data column:</label>
+      <select id="channel" disabled>
+        <option value="">Load a recording first</option>
+      </select>
+    </p>
+
+    <button id="playButton" disabled>Play EEG Recording</button>
+    <button id="stopButton">Stop Recording</button>
+    <button id="autoButton">Turn Auto Mode Off</button>
+    <button id="resetButton">Reset Game</button>
+
+    <p id="status">Choose your OpenBCI recording file to begin.</p>
+
+    <p>Signal Value: <span id="value">50</span></p>
+
+    <input
+      id="signal"
+      type="range"
+      min="0"
+      max="100"
+      value="50"
+    >
+
+    <p>Move the slider to move the ball up and down.</p>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const slider = document.getElementById("signal");
+    const valueText = document.getElementById("value");
+    const scoreText = document.getElementById("score");
+    const autoButton = document.getElementById("autoButton");
+    const resetButton = document.getElementById("resetButton");
+    const modeText = document.getElementById("mode");
+    const csvFile = document.getElementById("csvFile");
+    const channelSelect = document.getElementById("channel");
+    const playButton = document.getElementById("playButton");
+    const stopButton = document.getElementById("stopButton");
+    const statusText = document.getElementById("status");
+
+    let signal = 50;
+    let autoMode = true;
+    let score = 0;
+    let time = 0;
+    let rings = [];
+    let lastRing = 0;
+
+    let recording = [];
+    let playbackTimer = null;
+    let playbackIndex = 0;
+
+    const ball = {
+      x: 100,
+      y: 200,
+      radius: 12
+    };
+
+    function updateSignal(newValue) {
+      signal = Math.max(0, Math.min(100, Number(newValue)));
+      slider.value = signal;
+      valueText.textContent = signal.toFixed(1);
+
+      // Higher values move the ball upward.
+      ball.y = canvas.height - 30 -
+        (signal / 100) * (canvas.height - 60);
+    }
+
+    function stopPlayback() {
+      if (playbackTimer !== null) {
+        clearInterval(playbackTimer);
+        playbackTimer = null;
+      }
+
+      playButton.textContent = "Play EEG Recording";
+    }
+
+    function setMode(mode) {
+      modeText.textContent = mode;
+    }
+
+    // Load the OpenBCI recording.
+    csvFile.addEventListener("change", async () => {
+      stopPlayback();
+
+      autoMode = false;
+      autoButton.textContent = "Turn Auto Mode On";
+      setMode("Loading recording");
+
+      const file = csvFile.files[0];
+      if (!file) return;
+
+      try {
+        const text = (await file.text()).replace(/^\uFEFF/, "");
+
+        const lines = text.split(/\r?\n/)
+          .filter(line => line.trim() !== "");
+
+        const delimiter = lines[0].includes("\t") ? "\t" : ",";
+
+        const parsed = lines.map(line =>
+          line.split(delimiter).map(value => value.trim())
+        );
+
+        const numericRows = parsed
+          .map(row => row.map(value =>
+            value === "" ? NaN : Number(value)
+          ))
+          .filter(row =>
+            row.length > 1 &&
+            row.some(Number.isFinite)
+          );
+
+        if (numericRows.length < 2) {
+          throw new Error("Not enough numeric rows were found.");
+        }
+
+        // Keep rows with the most common number of columns.
+        const widths = {};
+
+        numericRows.forEach(row => {
+          widths[row.length] = (widths[row.length] || 0) + 1;
+        });
+
+        const columnCount = Number(
+          Object.keys(widths).sort((a, b) =>
+            widths[b] - widths[a]
+          )[0]
+        );
+
+        recording = numericRows.filter(
+          row => row.length === columnCount
+        );
+
+        if (recording.length < 2) {
+          throw new Error("Could not read consistent data rows.");
+        }
+
+        channelSelect.innerHTML = "";
+
+        for (let i = 0; i < columnCount; i++) {
+          const option = document.createElement("option");
+          option.value = i;
+          option.textContent = `Column ${i + 1}`;
+          channelSelect.appendChild(option);
+        }
+
+        // This is only a starting selection, not a confirmed EEG channel.
+        channelSelect.value = columnCount > 1 ? "1" : "0";
+        channelSelect.disabled = false;
+        playButton.disabled = false;
+
+        statusText.textContent =
+          `Loaded ${recording.length} rows and ${columnCount} columns. ` +
+          "Choose a column to test.";
+
+        setMode("Recording loaded");
+
+      } catch (error) {
+        recording = [];
+        channelSelect.disabled = true;
+        playButton.disabled = true;
+        statusText.textContent = "Could not read file: " + error.message;
+        setMode("Error");
+      }
+    });
+
+    function playRecording() {
+      stopPlayback();
+
+      if (!recording.length) {
+        statusText.textContent = "Load a recording first.";
+        return;
+      }
+
+      autoMode = false;
+      autoButton.textContent = "Turn Auto Mode On";
+      setMode("Recorded data");
+
+      const column = Number(channelSelect.value);
+
+      const samples = recording
+        .map(row => row[column])
+        .filter(Number.isFinite);
+
+      if (samples.length < 2) {
+        statusText.textContent = "Not enough samples in this column.";
+        return;
+      }
+
+      // Use percentiles to reduce the influence of extreme values.
+      const sorted = [...samples].sort((a, b) => a - b);
+
+      const low = sorted[Math.floor((sorted.length - 1) * 0.05)];
+      const high = sorted[Math.floor((sorted.length - 1) * 0.95)];
+
+      if (high === low) {
+        statusText.textContent =
+          "This column does not change enough. Try another.";
+        return;
+      }
+
+      playbackIndex = 0;
+
+      function playNextSample() {
+        if (playbackIndex >= samples.length) {
+          stopPlayback();
+          statusText.textContent = "Playback complete.";
+          setMode("Recording finished");
+          return;
+        }
+
+        const rawValue = samples[playbackIndex];
+
+        const normalized = Math.max(
+          0,
+          Math.min(100, ((rawValue - low) / (high - low)) * 100)
+        );
+
+        updateSignal(normalized);
+
+        statusText.textContent =
+          `Playing sample ${playbackIndex + 1} of ${samples.length}. ` +
+          `Raw value: ${rawValue.toFixed(3)}`;
+
+        playbackIndex++;
+      }
+
+      playNextSample();
+      playbackTimer = setInterval(playNextSample, 20);
+      playButton.textContent = "Restart Recording";
+    }
+
+    playButton.addEventListener("click", playRecording);
+
+    stopButton.addEventListener("click", () => {
+      stopPlayback();
+      setMode("Stopped");
+      statusText.textContent = "Playback stopped.";
+    });
+
+    channelSelect.addEventListener("change", () => {
+      stopPlayback();
+      statusText.textContent =
+        `Selected Column ${Number(channelSelect.value) + 1}. ` +
+        "Press Play EEG Recording to test it.";
+    });
+
+    slider.addEventListener("input", () => {
+      stopPlayback();
+      autoMode = false;
+      autoButton.textContent = "Turn Auto Mode On";
+      setMode("Manual / Simulated");
+      updateSignal(slider.value);
+    });
+
+    autoButton.addEventListener("click", () => {
+      stopPlayback();
+      autoMode = !autoMode;
+
+      autoButton.textContent = autoMode
+        ? "Turn Auto Mode Off"
+        : "Turn Auto Mode On";
+
+      setMode(autoMode ? "Simulated" : "Manual / Simulated");
+    });
+
+    resetButton.addEventListener("click", () => {
+      score = 0;
+      rings = [];
+      time = 0;
+      lastRing = 0;
+
+      scoreText.textContent = score;
+      updateSignal(50);
+    });
+
+    function createRing() {
+      rings.push({
+        x: canvas.width + 20,
+        y: 40 + Math.random() * (canvas.height - 80),
+        radius: 20,
+        counted: false
+      });
+    }
+
+    function animate() {
+      time++;
+
+      if (autoMode) {
+        updateSignal(50 + 40 * Math.sin(time * 0.025));
+      }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = "#18182a";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      if (time - lastRing > 100) {
+        createRing();
+        lastRing = time;
+      }
+
+      rings.forEach(ring => {
+        ring.x -= 3;
+
+        ctx.beginPath();
+        ctx.arc(ring.x, ring.y, ring.radius, 0, Math.PI * 2);
+        ctx.strokeStyle = "#9b83ff";
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        if (!ring.counted && ring.x < ball.x) {
+          ring.counted = true;
+
+          const distance = Math.abs(ball.y - ring.y);
+
+          if (distance < ring.radius + ball.radius) {
+            score++;
+            scoreText.textContent = score;
+          }
+        }
+      });
+
+      rings = rings.filter(ring => ring.x > -30);
+
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+      ctx.fillStyle = "#62f4ff";
+      ctx.fill();
+
+      requestAnimationFrame(animate);
+    }
+
+    updateSignal(50);
+    animate();
+  </script>
+</body>
+</html>
